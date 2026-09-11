@@ -1,5 +1,5 @@
-use prost::Message;
-use reqwest::Client;
+use prost::{bytes::Bytes, Message};
+use reqwest::{header::HeaderMap, Client};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
@@ -27,15 +27,15 @@ const PROTOCOL_VERSION: &str = "0";
 
 struct HttpResponse {
 	status_code: u16,
-	body: Vec<u8>,
+	body: Bytes,
 }
 
 impl HttpResponse {
 	fn decode<Rs: Message + Default>(self) -> Result<Rs, VssError> {
 		if (200..300).contains(&self.status_code) {
-			Ok(Rs::decode(prost::bytes::Bytes::from(self.body))?)
+			Ok(Rs::decode(self.body)?)
 		} else {
-			Err(VssError::new(self.status_code.into(), self.body))
+			Err(VssError::from_body(self.status_code.into(), self.body))
 		}
 	}
 }
@@ -103,10 +103,12 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 	) -> Result<GetObjectResponse, VssError> {
 		let request_id: u64 = rand::random();
 		trace!("Sending GetObjectRequest {} for key {}.", request_id, request.key);
+		let request_body = Bytes::from(request.encode_to_vec());
+		let url = format!("{}/getObject", self.base_url);
+		let headers = self.get_headers(&request_body).await?;
 		let res = retry(
 			|| async {
-				let url = format!("{}/getObject", self.base_url);
-				self.post_request(request, &url, true).await.and_then(
+				self.post_request(&request_body, &url, &headers, true).await.and_then(
 					|response: GetObjectResponse| {
 						if response.value.is_none() {
 							Err(VssError::InternalServerError(
@@ -141,14 +143,12 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			KeyValueVecKeyPrinter(&request.transaction_items),
 			KeyValueVecKeyPrinter(&request.delete_items),
 		);
-		let res = retry(
-			|| async {
-				let url = format!("{}/putObjects", self.base_url);
-				self.post_request(request, &url, false).await
-			},
-			&self.retry_policy,
-		)
-		.await;
+		let request_body = Bytes::from(request.encode_to_vec());
+		let url = format!("{}/putObjects", self.base_url);
+		let headers = self.get_headers(&request_body).await?;
+		let res =
+			retry(|| self.post_request(&request_body, &url, &headers, false), &self.retry_policy)
+				.await;
 		if let Err(ref e) = res {
 			trace!("PutObjectRequest {} failed: {}", request_id, e);
 		}
@@ -167,14 +167,12 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			request_id,
 			request.key_value.as_ref().map(|t| &t.key)
 		);
-		let res = retry(
-			|| async {
-				let url = format!("{}/deleteObject", self.base_url);
-				self.post_request(request, &url, true).await
-			},
-			&self.retry_policy,
-		)
-		.await;
+		let request_body = Bytes::from(request.encode_to_vec());
+		let url = format!("{}/deleteObject", self.base_url);
+		let headers = self.get_headers(&request_body).await?;
+		let res =
+			retry(|| self.post_request(&request_body, &url, &headers, true), &self.retry_policy)
+				.await;
 		if let Err(ref e) = res {
 			trace!("DeleteObjectRequest {} failed: {}", request_id, e);
 		}
@@ -195,39 +193,38 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			request.page_size,
 			request.page_token
 		);
-		let res = retry(
-			|| async {
-				let url = format!("{}/listKeyVersions", self.base_url);
-				self.post_request(request, &url, true).await
-			},
-			&self.retry_policy,
-		)
-		.await;
+		let request_body = Bytes::from(request.encode_to_vec());
+		let url = format!("{}/listKeyVersions", self.base_url);
+		let headers = self.get_headers(&request_body).await?;
+		let res =
+			retry(|| self.post_request(&request_body, &url, &headers, true), &self.retry_policy)
+				.await;
 		if let Err(ref e) = res {
 			trace!("ListKeyVersionsRequest {} failed: {}", request_id, e);
 		}
 		res
 	}
 
-	async fn post_request<Rq: Message, Rs: Message + Default>(
-		&self, request: &Rq, url: &str, enable_pipelining: bool,
-	) -> Result<Rs, VssError> {
-		let request_body = request.encode_to_vec();
+	async fn get_headers(&self, request_body: &[u8]) -> Result<HeaderMap, VssError> {
 		let headers = self
 			.header_provider
-			.get_headers(&request_body)
+			.get_headers(request_body)
 			.await
 			.map_err(|e| VssError::AuthError(e.to_string()))?;
+		HeaderMap::try_from(&headers).map_err(|e| VssError::InternalError(e.to_string()))
+	}
 
-		self.send_post(url, request_body, headers, enable_pipelining).await?.decode()
+	async fn post_request<Rs: Message + Default>(
+		&self, request_body: &Bytes, url: &str, headers: &HeaderMap, enable_pipelining: bool,
+	) -> Result<Rs, VssError> {
+		self.send_post(url, request_body.clone(), headers.clone(), enable_pipelining)
+			.await?
+			.decode()
 	}
 
 	async fn send_post(
-		&self, url: &str, request_body: Vec<u8>, headers: HashMap<String, String>,
-		_enable_pipelining: bool,
+		&self, url: &str, request_body: Bytes, headers: HeaderMap, _enable_pipelining: bool,
 	) -> Result<HttpResponse, VssError> {
-		let headers = reqwest::header::HeaderMap::try_from(&headers)
-			.map_err(|e| VssError::InternalError(e.to_string()))?;
 		let mut response = self
 			.client
 			.post(url)

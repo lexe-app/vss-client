@@ -9,6 +9,7 @@ use bitcoin::hashes::sha256;
 use bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::secp256k1::{Message, Secp256k1, SignOnly};
 use bitcoin::PrivateKey;
+use prost::bytes::Bytes;
 use reqwest::Url;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -90,13 +91,14 @@ impl LnurlAuthToJwtProvider {
 		let client = http::new_client(1);
 		// Fetch the LNURL.
 		let lnurl_response = self.send_get(&client, &self.url).await?;
-		let lnurl_str =
-			String::from_utf8(lnurl_response).map_err(|e| VssHeaderProviderError::InvalidData {
+		let lnurl_str = std::str::from_utf8(&lnurl_response).map_err(|e| {
+			VssHeaderProviderError::InvalidData {
 				error: format!("LNURL response is not valid UTF-8: {}", e),
-			})?;
+			}
+		})?;
 
 		// Sign the LNURL and perform the request.
-		let signed_lnurl = sign_lnurl(&self.engine, &self.parent_key, &lnurl_str)?;
+		let signed_lnurl = sign_lnurl(&self.engine, &self.parent_key, lnurl_str)?;
 		let auth_response = self.send_get(&client, &signed_lnurl).await?;
 		let lnurl_auth_response: LnurlAuthResponse = serde_json::from_slice(&auth_response)
 			.map_err(|e| VssHeaderProviderError::InvalidData {
@@ -121,7 +123,7 @@ impl LnurlAuthToJwtProvider {
 
 	async fn send_get(
 		&self, client: &reqwest::Client, url: &str,
-	) -> Result<Vec<u8>, VssHeaderProviderError> {
+	) -> Result<Bytes, VssHeaderProviderError> {
 		let headers = reqwest::header::HeaderMap::try_from(&self.default_headers)
 			.map_err(|e| VssHeaderProviderError::RequestError { error: e.to_string() })?;
 		let response = client

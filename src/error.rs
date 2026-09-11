@@ -1,5 +1,5 @@
 use crate::types::{ErrorCode, ErrorResponse};
-use prost::{DecodeError, Message};
+use prost::{bytes::Buf, DecodeError, Message};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -39,7 +39,11 @@ pub enum VssError {
 impl VssError {
 	/// Create new instance of `VssError`
 	pub fn new(status_code: i32, payload: Vec<u8>) -> VssError {
-		match ErrorResponse::decode(&payload[..]) {
+		Self::from_body(status_code, &payload[..])
+	}
+
+	pub(crate) fn from_body(status_code: i32, payload: impl Buf) -> VssError {
+		match ErrorResponse::decode(payload) {
 			Ok(error_response) => VssError::from(error_response),
 			Err(e) => {
 				let message = format!(
