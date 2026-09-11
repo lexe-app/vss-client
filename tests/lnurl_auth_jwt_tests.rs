@@ -37,18 +37,20 @@ mod lnurl_auth_jwt_tests {
 		let addr = mockito::server_address();
 		let base_url = format!("http://localhost:{}", addr.port());
 		let parent_key = Xpriv::new_master(Network::Testnet, &[0; 32]).unwrap();
-		let lnurl_auth_jwt =
-			LnurlAuthToJwtProvider::new(parent_key, base_url.clone(), HashMap::new());
+		let headers = HashMap::from([("X-Lnurl-Test".to_string(), "test-value".to_string())]);
+		let lnurl_auth_jwt = LnurlAuthToJwtProvider::new(parent_key, base_url.clone(), headers);
 		{
 			// First request will be provided with an expired JWT token.
 			let k1 = "0000000000000000000000000000000000000000000000000000000000000000";
 			let expired_jwt = jwt_with_expiry(0);
 			let lnurl = mockito::mock("GET", "/")
+				.match_header("x-lnurl-test", "test-value")
 				.expect(1)
 				.with_status(200)
 				.with_body(format!("{}/verify?tag=login&k1={}", base_url, k1))
 				.create();
 			let lnurl_verification = mockito::mock("GET", "/verify")
+				.match_header("x-lnurl-test", "test-value")
 				.match_query(Matcher::AllOf(vec![
 					Matcher::UrlEncoded("k1".into(), k1.into()),
 					Matcher::Regex("sig=".into()),
@@ -75,11 +77,13 @@ mod lnurl_auth_jwt_tests {
 					+ 60 * 60 * 24 * 365,
 			);
 			let lnurl = mockito::mock("GET", "/")
+				.match_header("x-lnurl-test", "test-value")
 				.expect(1)
 				.with_status(200)
 				.with_body(format!("{}/verify?tag=login&k1={}", base_url, k1))
 				.create();
 			let lnurl_verification = mockito::mock("GET", "/verify")
+				.match_header("x-lnurl-test", "test-value")
 				.match_query(Matcher::AllOf(vec![
 					Matcher::UrlEncoded("k1".into(), k1.into()),
 					Matcher::Regex("sig=".to_string()),
@@ -101,5 +105,6 @@ mod lnurl_auth_jwt_tests {
 			lnurl.assert();
 			lnurl_verification.assert();
 		}
+		assert_eq!(lnurl_auth_jwt.get_headers(&[]).await.unwrap()["X-Lnurl-Test"], "test-value");
 	}
 }
