@@ -1,3 +1,4 @@
+use prost::bytes::{Bytes, BytesMut};
 use std::fmt;
 
 pub(crate) fn new_client(capacity: usize) -> reqwest::Client {
@@ -24,20 +25,34 @@ impl fmt::Display for ReadBodyError {
 
 pub(crate) async fn read_body(
 	mut response: reqwest::Response, limit: usize,
-) -> Result<Vec<u8>, ReadBodyError> {
+) -> Result<Bytes, ReadBodyError> {
 	let capacity = match response.content_length() {
 		Some(length) if length > limit as u64 => return Err(ReadBodyError::TooLarge { limit }),
 		Some(length) => length as usize,
 		None => 0,
 	};
-	let mut body = Vec::with_capacity(capacity);
+	let mut first_chunk = Bytes::new();
+	let mut body = BytesMut::new();
 	while let Some(chunk) = response.chunk().await.map_err(ReadBodyError::Request)? {
-		if chunk.len() > limit - body.len() {
+		let length = first_chunk.len() + body.len();
+		if chunk.len() > limit - length {
 			return Err(ReadBodyError::TooLarge { limit });
+		}
+		if chunk.is_empty() {
+			continue;
+		}
+		if length == 0 {
+			first_chunk = chunk;
+			continue;
+		}
+		if body.is_empty() {
+			body = BytesMut::with_capacity(capacity.max(length + chunk.len()));
+			body.extend_from_slice(&first_chunk);
+			first_chunk = Bytes::new();
 		}
 		body.extend_from_slice(&chunk);
 	}
-	Ok(body)
+	Ok(if body.is_empty() { first_chunk } else { body.freeze() })
 }
 
 #[cfg(test)]
