@@ -1,4 +1,5 @@
 use crate::headers::{VssHeaderProvider, VssHeaderProviderError};
+use crate::http;
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -8,7 +9,7 @@ use bitcoin::hashes::sha256;
 use bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::secp256k1::{Message, Secp256k1, SignOnly};
 use bitcoin::PrivateKey;
-use bitreq::Url;
+use reqwest::Url;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -86,7 +87,7 @@ impl LnurlAuthToJwtProvider {
 	}
 
 	async fn fetch_jwt_token(&self) -> Result<JwtToken, VssHeaderProviderError> {
-		let client = bitreq::Client::new(1);
+		let client = http::new_client(1);
 		// Fetch the LNURL.
 		let lnurl_response = self.send_get(&client, &self.url).await?;
 		let lnurl_str =
@@ -119,14 +120,19 @@ impl LnurlAuthToJwtProvider {
 	}
 
 	async fn send_get(
-		&self, client: &bitreq::Client, url: &str,
+		&self, client: &reqwest::Client, url: &str,
 	) -> Result<Vec<u8>, VssHeaderProviderError> {
-		let request = bitreq::get(url)
-			.with_headers(self.default_headers.clone())
-			.with_timeout(DEFAULT_TIMEOUT_SECS)
-			.with_max_body_size(Some(MAX_RESPONSE_BODY_SIZE));
-		let response = client.send_async(request).await.map_err(VssHeaderProviderError::from)?;
-		Ok(response.into_bytes())
+		let headers = reqwest::header::HeaderMap::try_from(&self.default_headers)
+			.map_err(|e| VssHeaderProviderError::RequestError { error: e.to_string() })?;
+		let response = client
+			.get(url)
+			.headers(headers)
+			.timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+			.send()
+			.await?;
+		http::read_body(response, MAX_RESPONSE_BODY_SIZE)
+			.await
+			.map_err(|e| VssHeaderProviderError::RequestError { error: e.to_string() })
 	}
 
 	async fn get_jwt_token(&self) -> Result<String, VssHeaderProviderError> {
@@ -193,7 +199,9 @@ fn sign_lnurl(
 		error: format!("invalid lnurl: {}", lnurl_str.escape_debug()),
 	};
 	let mut lnurl = Url::parse(lnurl_str).map_err(|_| invalid_lnurl())?;
-	let domain = lnurl.base_url();
+	// NOTE(phlip9): reqwest::Url normalizes the URL host segment, bitreq does
+	// not. So if we ever use lnurl-auth with VSS, then maybe reconsider this?
+	let domain = lnurl.host_str().ok_or_else(invalid_lnurl)?;
 	let k1_str = lnurl
 		.query_pairs()
 		.find(|(k, _)| k == K1_QUERY_PARAM)
@@ -220,7 +228,7 @@ fn sign_lnurl(
 	let serialized_pubkey = linking_public_key.to_string();
 	let query_params =
 		[(SIG_QUERY_PARAM, serialized_sig.as_str()), (KEY_QUERY_PARAM, serialized_pubkey.as_str())];
-	lnurl.append_query_params(query_params.into_iter());
+	lnurl.query_pairs_mut().extend_pairs(query_params);
 	Ok(lnurl.to_string())
 }
 
@@ -259,8 +267,8 @@ impl From<bitcoin::bip32::Error> for VssHeaderProviderError {
 	}
 }
 
-impl From<bitreq::Error> for VssHeaderProviderError {
-	fn from(e: bitreq::Error) -> VssHeaderProviderError {
+impl From<reqwest::Error> for VssHeaderProviderError {
+	fn from(e: reqwest::Error) -> VssHeaderProviderError {
 		VssHeaderProviderError::RequestError { error: e.to_string() }
 	}
 }

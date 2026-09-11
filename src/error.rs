@@ -120,8 +120,8 @@ impl From<DecodeError> for VssError {
 	}
 }
 
-impl From<bitreq::Error> for VssError {
-	fn from(err: bitreq::Error) -> Self {
+impl From<reqwest::Error> for VssError {
+	fn from(err: reqwest::Error) -> Self {
 		VssError::InternalError(err.to_string())
 	}
 }
