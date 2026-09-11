@@ -23,6 +23,21 @@ const DEFAULT_CLIENT_CAPACITY: usize = 10;
 const PROTOCOL_VERSION_HEADER: &str = "vss-protocol-version";
 const PROTOCOL_VERSION: &str = "0";
 
+struct HttpResponse {
+	status_code: u16,
+	body: Vec<u8>,
+}
+
+impl HttpResponse {
+	fn decode<Rs: Message + Default>(self) -> Result<Rs, VssError> {
+		if (200..300).contains(&self.status_code) {
+			Ok(Rs::decode(prost::bytes::Bytes::from(self.body))?)
+		} else {
+			Err(VssError::new(self.status_code.into(), self.body))
+		}
+	}
+}
+
 /// Thin-client to access a hosted instance of Versioned Storage Service (VSS).
 /// The provided [`VssClient`] API is minimalistic and is congruent to the VSS server-side API.
 #[derive(Clone)]
@@ -202,6 +217,13 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			.await
 			.map_err(|e| VssError::AuthError(e.to_string()))?;
 
+		self.send_post(url, request_body, headers, enable_pipelining).await?.decode()
+	}
+
+	async fn send_post(
+		&self, url: &str, request_body: Vec<u8>, headers: HashMap<String, String>,
+		enable_pipelining: bool,
+	) -> Result<HttpResponse, VssError> {
 		let mut http_request = bitreq::post(url)
 			.with_header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
 			.with_headers(headers)
@@ -213,26 +235,21 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			http_request = http_request.with_pipelining();
 		}
 
-		let response = self.client.send_async(http_request).await?;
+		let mut response = self.client.send_async(http_request).await?;
+		let status_code = response.status_code;
+		let protocol_version = response.headers.remove(PROTOCOL_VERSION_HEADER);
+		let body = response.into_bytes();
+
 		// Return early in case of version mismatch, this issue must be solved first.
-		if response.headers.get(PROTOCOL_VERSION_HEADER).map(String::as_str)
-			!= Some(PROTOCOL_VERSION)
-		{
-			let mut response = response;
+		if protocol_version.as_deref() != Some(PROTOCOL_VERSION) {
 			return Err(VssError::VSSVersionMismatchError {
-				version_served: response.headers.remove(PROTOCOL_VERSION_HEADER),
+				version_served: protocol_version,
 				version_expected: String::from(PROTOCOL_VERSION),
 			});
 		}
 
-		let status_code = response.status_code;
-		let payload = response.into_bytes();
-
-		if (200..300).contains(&status_code) {
-			let response = Rs::decode(&payload[..])?;
-			Ok(response)
-		} else {
-			Err(VssError::new(status_code, payload))
-		}
+		let status_code =
+			u16::try_from(status_code).map_err(|e| VssError::InternalError(e.to_string()))?;
+		Ok(HttpResponse { status_code, body })
 	}
 }
