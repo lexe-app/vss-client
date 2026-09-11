@@ -1,13 +1,15 @@
-use bitreq::Client;
 use prost::Message;
+use reqwest::Client;
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
+use std::time::Duration;
 
 use log::trace;
 
 use crate::error::VssError;
 use crate::headers::{FixedHeaders, VssHeaderProvider};
+use crate::http;
 use crate::types::{
 	DeleteObjectRequest, DeleteObjectResponse, GetObjectRequest, GetObjectResponse,
 	ListKeyVersionsRequest, ListKeyVersionsResponse, PutObjectRequest, PutObjectResponse,
@@ -54,11 +56,11 @@ where
 impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 	/// Constructs a [`VssClient`] using `base_url` as the VSS server endpoint.
 	pub fn new(base_url: String, retry_policy: R) -> Self {
-		let client = Client::new(DEFAULT_CLIENT_CAPACITY);
+		let client = http::new_client(DEFAULT_CLIENT_CAPACITY);
 		Self::from_client(base_url, client, retry_policy)
 	}
 
-	/// Constructs a [`VssClient`] from a given [`bitreq::Client`], using `base_url` as the VSS server endpoint.
+	/// Constructs a [`VssClient`] from a given [`reqwest::Client`], using `base_url` as the VSS server endpoint.
 	pub fn from_client(base_url: String, client: Client, retry_policy: R) -> Self {
 		Self {
 			base_url,
@@ -68,7 +70,7 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 		}
 	}
 
-	/// Constructs a [`VssClient`] from a given [`bitreq::Client`], using `base_url` as the VSS server endpoint.
+	/// Constructs a [`VssClient`] from a given [`reqwest::Client`], using `base_url` as the VSS server endpoint.
 	///
 	/// HTTP headers will be provided by the given `header_provider`.
 	pub fn from_client_and_headers(
@@ -84,7 +86,7 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 	pub fn new_with_headers(
 		base_url: String, retry_policy: R, header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Self {
-		let client = Client::new(DEFAULT_CLIENT_CAPACITY);
+		let client = http::new_client(DEFAULT_CLIENT_CAPACITY);
 		Self { base_url, client, retry_policy, header_provider }
 	}
 
@@ -222,34 +224,36 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 
 	async fn send_post(
 		&self, url: &str, request_body: Vec<u8>, headers: HashMap<String, String>,
-		enable_pipelining: bool,
+		_enable_pipelining: bool,
 	) -> Result<HttpResponse, VssError> {
-		let mut http_request = bitreq::post(url)
-			.with_header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
-			.with_headers(headers)
-			.with_body(request_body)
-			.with_timeout(DEFAULT_TIMEOUT_SECS)
-			.with_max_body_size(Some(MAX_RESPONSE_BODY_SIZE));
-
-		if enable_pipelining {
-			http_request = http_request.with_pipelining();
-		}
-
-		let mut response = self.client.send_async(http_request).await?;
-		let status_code = response.status_code;
-		let protocol_version = response.headers.remove(PROTOCOL_VERSION_HEADER);
-		let body = response.into_bytes();
+		let headers = reqwest::header::HeaderMap::try_from(&headers)
+			.map_err(|e| VssError::InternalError(e.to_string()))?;
+		let mut response = self
+			.client
+			.post(url)
+			.header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
+			.headers(headers)
+			.body(request_body)
+			.timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+			.send()
+			.await?;
+		let status_code = response.status().as_u16();
+		let protocol_version = response.headers_mut().remove(PROTOCOL_VERSION_HEADER);
+		let body = http::read_body(response, MAX_RESPONSE_BODY_SIZE)
+			.await
+			.map_err(|e| VssError::InternalError(e.to_string()))?;
 
 		// Return early in case of version mismatch, this issue must be solved first.
-		if protocol_version.as_deref() != Some(PROTOCOL_VERSION) {
+		if protocol_version.as_ref().map(|value| value.as_bytes())
+			!= Some(PROTOCOL_VERSION.as_bytes())
+		{
 			return Err(VssError::VSSVersionMismatchError {
-				version_served: protocol_version,
+				version_served: protocol_version
+					.map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned()),
 				version_expected: String::from(PROTOCOL_VERSION),
 			});
 		}
 
-		let status_code =
-			u16::try_from(status_code).map_err(|e| VssError::InternalError(e.to_string()))?;
 		Ok(HttpResponse { status_code, body })
 	}
 }
