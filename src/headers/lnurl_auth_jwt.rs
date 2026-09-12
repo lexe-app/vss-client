@@ -49,8 +49,6 @@ impl JwtToken {
 	}
 }
 
-const DEFAULT_TIMEOUT_SECS: u64 = 10;
-
 /// Provides a JWT token based on LNURL Auth.
 pub struct LnurlAuthToJwtProvider {
 	engine: Secp256k1<SignOnly>,
@@ -126,12 +124,7 @@ impl LnurlAuthToJwtProvider {
 	) -> Result<Bytes, VssHeaderProviderError> {
 		let headers = reqwest::header::HeaderMap::try_from(&self.default_headers)
 			.map_err(|e| VssHeaderProviderError::RequestError { error: e.to_string() })?;
-		let response = client
-			.get(url)
-			.headers(headers)
-			.timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-			.send()
-			.await?;
+		let response = client.get(url).headers(headers).send().await?;
 		http::read_body(response, MAX_RESPONSE_BODY_SIZE)
 			.await
 			.map_err(|e| VssHeaderProviderError::RequestError { error: e.to_string() })

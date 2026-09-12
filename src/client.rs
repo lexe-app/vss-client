@@ -3,7 +3,6 @@ use reqwest::{header::HeaderMap, Client};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::trace;
 
@@ -19,7 +18,6 @@ use crate::util::KeyValueVecKeyPrinter;
 
 const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 const CONTENT_TYPE: &str = "content-type";
-const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const MAX_RESPONSE_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1GB
 const DEFAULT_CLIENT_CAPACITY: usize = 10;
 const PROTOCOL_VERSION_HEADER: &str = "vss-protocol-version";
@@ -231,7 +229,6 @@ impl<R: RetryPolicy<E = VssError>> VssClient<R> {
 			.header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
 			.headers(headers)
 			.body(request_body)
-			.timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
 			.send()
 			.await?;
 		let status_code = response.status().as_u16();
