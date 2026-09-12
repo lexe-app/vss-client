@@ -1,9 +1,13 @@
 use prost::bytes::{Bytes, BytesMut};
 use std::fmt;
+use std::time::Duration;
+
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 pub(crate) fn new_client(capacity: usize) -> reqwest::Client {
 	reqwest::Client::builder()
 		.pool_max_idle_per_host(capacity)
+		.timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
 		.build()
 		.expect("Failed to build HTTP client")
 }
@@ -58,7 +62,6 @@ pub(crate) async fn read_body(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::time::Duration;
 
 	#[tokio::test]
 	async fn test_response_body_limit() {
